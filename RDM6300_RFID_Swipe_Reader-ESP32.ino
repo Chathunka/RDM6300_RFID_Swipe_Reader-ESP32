@@ -1,10 +1,26 @@
 #include <HardwareSerial.h>
 
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+const char* ssid = "ssid";
+const char* password = "password";
+const char* mqttServer = "demo.thingsboard.io";
+const int mqttPort = 1883;
+const char* mqttUser = "mqttuser";
+const char* mqttPassword = "";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
 const int BUFFER_SIZE = 14; // RFID DATA FRAME FORMAT: 1byte head (value: 2), 10byte data (2byte version + 8byte tag), 2byte checksum, 1byte tail (value: 3)
 const int DATA_SIZE = 10; // 10byte data (2byte version + 8byte tag)
 const int DATA_VERSION_SIZE = 2; // 2byte version (actual meaning of these two bytes may vary)
 const int DATA_TAG_SIZE = 8; // 8byte tag
 const int CHECKSUM_SIZE = 2; // 2byte checksum
+
+bool rdyUpdate = false;
+int lastUpdatedAdd = 0;
 
 uint8_t buffer[BUFFER_SIZE]; // used to store an incoming data frame 
 int buffer_index = 0;
@@ -18,15 +34,30 @@ HardwareSerial ssrfid(1); // Using HardwareSerial on ESP32
 const int RX_PIN = 4; // Change to appropriate pin for your board
 const int TX_PIN = 5; // Change to appropriate pin for your board
 
-const int LED = 2;
+const int LED = 12;
+const int PLED = 13;
 
 void setup() {
- Serial.begin(115200);
- ssrfid.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN); // Initializing HardwareSerial on ESP32
- pinMode(LED,OUTPUT);
- digitalWrite(LED,LOW);
- Serial.println(" INIT DONE");
- waitingtimer = millis();
+  Serial.begin(115200);
+  Serial.println("RFID INIT");
+  ssrfid.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN); // Initializing HardwareSerial on ESP32
+  pinMode(LED,OUTPUT);
+  pinMode(PLED,OUTPUT);
+  digitalWrite(PLED,HIGH);
+  digitalWrite(LED,LOW);
+  Serial.println("RFID INIT - DONE");
+  Serial.println("WIFI INIT");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("WIFI INIT - CONNECTED");
+  Serial.println("MQTT INIT");
+  client.setServer(mqttServer, mqttPort);
+  reconnect();
+  Serial.println("MQTT INIT - CONNECTED");
+  waitingtimer = millis();
 }
 
 void loop() {
@@ -36,12 +67,15 @@ void loop() {
     digitalWrite(LED,LOW);
     if(ctag > 0){
       if(tagindex == 0){
+        rdyUpdate = true;
         tags[0]=ctag;
         tagindex++;
       }else{
         if(matchTag(ctag)){
+          rdyUpdate = true;
           tags[tagindex] = ctag;  
           tagindex++;
+        }else{
         }
       }
       waitingtimer = millis();
@@ -52,11 +86,48 @@ void loop() {
     Serial.print("ItemsCountes : ");
     Serial.println(tagindex);
     showAllTags();
-    delay(2000);
+    if (!client.connected()) {
+      reconnect();
+    }
+    client.loop();
+    if(rdyUpdate){
+      Serial.print("Sending data to Thingspeak : ");
+      sendData(lastUpdatedAdd);
+      rdyUpdate = false;
+    }
+    lastUpdatedAdd = tagindex;
     Serial.println("update: finished");
+    delay(1000);
     waitingtimer = millis();
     delay(2);
 //update
+  }
+}
+
+void sendData(int lastUpdatedAdd) {
+  for(int i =lastUpdatedAdd; i<tagindex; i++){
+    char data[50];
+    sprintf(data, "{\"Tag UID\": %d, \"Occurance\": %d}", tags[i], 1);
+    client.publish("v1/devices/me/telemetry", data);
+    Serial.print("updating: ");
+    Serial.println(tags[i]);
+    delay(500);
+  }
+  char data[25];
+  sprintf(data, "{\"Tag Count\": %d}", tagindex);
+  client.publish("v1/devices/me/telemetry", data);
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.println("Connecting to MQTT...");
+    if (client.connect("ESP32Client", mqttUser, mqttPassword )) {
+      Serial.println("Connected to MQTT");
+    } else {
+      Serial.print("Failed with state ");
+      Serial.print(client.state());
+      delay(2000);
+    }
   }
 }
 
